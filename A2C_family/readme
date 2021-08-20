@@ -1,0 +1,11 @@
+algorithms:
+A2C
+AGE
+PPO
+DDPG
+
+Environments：
+discrete：
+  CartPole-v0， PongNoFrameskip-v4
+continuous：
+  Pendulum-v0， LunarLanderContinuous-v2
