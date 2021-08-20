@@ -1,0 +1,12 @@
+algorithms:
+
+DQN
+Double_DQN
+Dueling_DQN
+Prioritized_DQN
+Noisy_DQN
+Categorical_DQN
+Multi-Step_DQN
+Rainbow
+
+To speed up the training process, a parallel environment procedure is employed under which one agent could control multiple environments.
