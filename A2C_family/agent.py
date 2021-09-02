@@ -15,6 +15,8 @@ def Agent(state_dim,action_dim,cfg):
         return PPO(state_dim,action_dim,cfg)
     elif cfg.agent == 'DDPG':
         return DDPG(state_dim,action_dim,cfg)
+    elif cfg.agent == 'TD3':
+        return TD3(state_dim,action_dim,cfg)
 
 
 class A2C(object):
@@ -282,6 +284,115 @@ class DDPG(object):
         self.policy_net.load_state_dict(torch.load(path+self.agent_name+'_checkpoint.pth'))
 #         for target_param, param in zip(self.target_net.parameters(), self.policy_net.parameters()):
 #             param.data.copy_(target_param.data)
+
+
+# +
+from model import Actor_MLP, Critic_twin_MLP
+
+class TD3(object):
+    def __init__(self,state_dim,action_dim,cfg):
+        self.agent_name = cfg.agent
+        self.gamma = cfg.gamma                        # discount rate of reward
+        self.actor_lr = cfg.actor_lr                  # learning rate of policy opt
+        self.critic_lr = cfg.critic_lr                # learning rate of value opt
+        self.state_dim = state_dim                    # dimension of state
+        self.action_dim = action_dim                  # dimension of action     
+        self.sample_steps = 0                         # number of steps of sample()
+        self.learning_steps = 0                       # number of steps of learning
+        self.device = cfg.device                      # cpu or gpu
+        self.epsilon =  lambda sample_steps: cfg.epsilon_end + \
+                                            (cfg.epsilon_start - cfg.epsilon_end) * \
+                                            np.exp(-0.1 * sample_steps * cfg.epsilon_decay)
+        self.policy_noise_std = cfg.policy_noise_std   # std of Gaussian noise added to target policy during updating critic 
+        self.policy_noise_clip = cfg.policy_noise_clip # range to clip target policy noise
+        self.max_act = cfg.max_act                     # max action value
+        self.learn_policy_freq = cfg.learn_policy_freq # frequency of delayed policy updates
+        self.soft_tau = cfg.soft_tau                   # soft update target model
+        
+        self.policy_net = Actor_MLP(state_dim,action_dim,cfg.hidden_dim,cfg.max_act).to(self.device)
+        self.value_net = Critic_twin_MLP(state_dim,action_dim,cfg.hidden_dim).to(self.device)
+        self.target_policy_net = Actor_MLP(state_dim,action_dim,cfg.hidden_dim,cfg.max_act).to(self.device)
+        self.target_value_net = Critic_twin_MLP(state_dim,action_dim,cfg.hidden_dim).to(self.device)
+        self.policy_optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=cfg.actor_lr)
+        self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=cfg.critic_lr)
+        ## copy params to target net ##
+        self.sync_target_net(self.target_policy_net, self.policy_net, tau=1)
+        self.sync_target_net(self.target_value_net, self.value_net, tau=1)
+            
+    def sample(self,state):
+        with torch.no_grad():
+            action = self.predict(state)
+            sigma = self.epsilon(self.sample_steps)
+            noise = Normal(torch.zeros_like(action),torch.ones_like(action)*sigma)
+            action = torch.clamp(action+noise.sample(),-self.max_act,self.max_act) 
+            self.sample_steps += 1
+        return action.cpu().numpy()
+    
+    def predict(self,state):
+        with torch.no_grad():
+            state = torch.as_tensor(state, device=self.device, dtype=torch.float32)
+            action = self.policy_net(state)
+        return action
+    
+    def learn(self,batch_state,batch_action,batch_reward,batch_next_state,batch_done):
+        self.learning_steps += 1
+        
+        batch_state = torch.as_tensor(batch_state, device=self.device, dtype=torch.float32) #(b,c,?,?) or (b,nS)
+        batch_action = torch.as_tensor(batch_action,device=self.device) #(b,nA)
+        batch_reward = torch.as_tensor(batch_reward,device=self.device, dtype=torch.float32).unsqueeze(1) #(b,1)
+        batch_next_state = torch.as_tensor(batch_next_state, device=self.device, dtype=torch.float32)
+        batch_done = torch.as_tensor(np.float32(batch_done), device=self.device).unsqueeze(1) #(b,1)
+        
+        with torch.no_grad():
+            ## Target Policy smoothing ##
+            noise = Normal(torch.zeros_like(batch_action),torch.ones_like(batch_action)*self.policy_noise_std)
+            noise = noise.sample().clamp(-self.policy_noise_clip,self.policy_noise_clip)
+            next_act = self.target_policy_net(batch_next_state)  #(b,nA)
+            next_act = torch.clamp(next_act+noise,-self.max_act,self.max_act)
+            ## Clipped Dobule Q-learning ##
+            next_value1,next_value2 = self.target_value_net(batch_next_state,next_act) #(b,1)
+            next_value = torch.min(next_value1,next_value2)
+            expected_value = batch_reward + self.gamma*next_value*(1-batch_done)
+            
+        value1,value2 = self.value_net(batch_state,batch_action) #(b,1)
+        loss_critic = torch.nn.MSELoss()(value1, expected_value) + torch.nn.MSELoss()(value2, expected_value)
+        
+        self.value_optimizer.zero_grad()
+        loss_critic.backward()
+#         for param in self.value_net.parameters():  # clip防止梯度爆炸
+#             param.grad.data.clamp_(-1, 1)
+        self.value_optimizer.step()
+        
+        ## Delayed Policy Updates ##
+        if self.learning_steps % self.learn_policy_freq == 0:
+            loss_actor = -self.value_net.forward_first(batch_state,self.policy_net(batch_state)).mean() #(b,1) -> (1)
+            loss = loss_actor + .5*loss_critic 
+
+            self.policy_optimizer.zero_grad()
+            loss_actor.backward()
+    #         for param in self.policy_net.parameters():  # clip防止梯度爆炸
+    #             param.grad.data.clamp_(-1, 1)
+            self.policy_optimizer.step()
+
+            self.sync_target_net(self.target_policy_net, self.policy_net, tau=self.soft_tau)
+            self.sync_target_net(self.target_value_net, self.value_net, tau=self.soft_tau)
+            self.loss = loss.item()
+            return self.loss
+    
+    def sync_target_net(self, target, source, tau=0):
+        for target_param, param in zip(target.parameters(), source.parameters()):
+#             target_param.detach_()
+            target_param.data.copy_(target_param * (1.0 - tau) + param * tau)
+    
+    def save(self, path):
+        torch.save(self.policy_net.state_dict(), path+self.agent_name+'_actor_checkpoint.pth')
+        torch.save(self.value_net.state_dict(), path+self.agent_name+'_critic_checkpoint.pth')
+        
+    def load(self, path):
+        self.policy_net.load_state_dict(torch.load(path+self.agent_name+'_actor_checkpoint.pth'))
+        self.value_net.load_state_dict(torch.load(path+self.agent_name+'_critic_checkpoint.pth'))
+        self.sync_target_net(self.target_policy_net, self.policy_net, tau=1)
+        self.sync_target_net(self.target_value_net, self.value_net, tau=1)
 
 # +
 # class config:

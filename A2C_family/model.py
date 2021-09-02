@@ -60,6 +60,31 @@ class Critic_MLP(nn.Module):
         x = self.features(torch.cat([state,action],dim=-1))
         x = self.critic(x)
         return x
+    
+class Critic_twin_MLP(Critic_MLP): 
+    def __init__(self, inp_dim, act_dim, hidden_dim=256):
+        super(Critic_twin_MLP, self).__init__(inp_dim, act_dim, hidden_dim)
+        self.features2 = nn.Sequential(
+            nn.Linear(inp_dim+act_dim, hidden_dim),
+            nn.ReLU())
+        
+        self.critic2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1))
+    def forward(self, state, action):
+        state_act = torch.cat([state,action],dim=-1)
+        x1 = self.features(state_act)
+        x1 = self.critic(x1)
+        x2 = self.features2(state_act)
+        x2 = self.critic2(x2)
+        return x1,x2
+    
+    def forward_first(self, state, action):
+        state_act = torch.cat([state,action],dim=-1)
+        x1 = self.features(state_act)
+        x1 = self.critic(x1)
+        return x1
 # -
 
 
