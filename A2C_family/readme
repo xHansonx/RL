@@ -3,6 +3,7 @@ A2C
 AGE
 PPO
 DDPG
+TD3
 
 Environments：
 discrete：
